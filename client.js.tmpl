@@ -1,0 +1,530 @@
+window.__ModuleLoader__.load({
+  id: '@cekerel/dsh-video-wallpaper',
+  factory(require) {
+    const React = require('react');
+    const h = React.createElement;
+
+    // ---- Defaults (editable live from the plugin's configure page) ----------
+    const VIDEO_URL = '__VIDEO_URL__';
+    const STORE_KEY = 'dsh.videoWallpaper';
+    const EVENT = 'video-wallpaper:config';
+    const DEFAULTS = { enabled: true, paused: false, opacity: 0.18, blur: 0, dim: 0, pauseOnBlur: false, custom: false, uninstallCleanup: true };
+    const IDB_NAME = 'dsh.videoWallpaper', IDB_STORE = 'videos', IDB_KEY = 'custom';
+
+    const STRINGS = {
+      zh: {
+        enabled: '启用视频背景', paused: '临时隐藏壁纸（保留播放状态）', pauseOnBlur: '窗口失焦时暂停（省电）',
+        source: '视频源', pick: '选择视频文件…', clear: '清除', using: '当前：', savedButOff: '已保存 ', enableToUse: '，勾选下方开关启用',
+        builtin: '内置默认视频（Pixabay / padrinan · 黑胶唱片剪辑版）', useCustom: '使用自定义视频',
+        opacity: '透明度', blur: '模糊', veil: '遮罩',
+        cleanup: '卸载时清理本地数据（保留项：下次安装可还原设置与自定义视频）', wipe: '清除全部本地数据（恢复默认）',
+        errNotVideo: '所选文件不是视频（需要 video/* 类型）', errQuota: '保存失败：本地存储空间不足',
+        on: '已启用 · 透明度 ', pct: '%', blurSuffix: ' · 模糊 ', px: 'px', off: '已停用', hidden: '（已临时隐藏）',
+        note1: '遮罩直接调节视频自身的亮度（不叠加任何图层）：深色主题下视频变暗、白色文字对比更强；浅色主题下视频变亮、黑色文字对比更强。任何滑杆都不会碰到 UI 文字。',
+        note2: '调整即时生效并自动保存；窗口最小化或切到后台时视频自动暂停以省电。自定义视频保存在本地浏览器存储中，重启后仍有效。',
+        note3: '小贴士：壁纸在深色主题下观感与可读性最佳；浅色主题下视频会覆盖在文字上方，效果有限，建议搭配深色主题使用。',
+      },
+      en: {
+        enabled: 'Enable video wallpaper', paused: 'Temporarily hide wallpaper (keeps playback state)', pauseOnBlur: 'Pause when window loses focus (saves power)',
+        source: 'Video source', pick: 'Pick a video file…', clear: 'Clear', using: 'Current: ', savedButOff: 'Saved ', enableToUse: ' — enable below to use it',
+        builtin: 'Built-in default video (Pixabay / padrinan · trimmed vinyl loop)', useCustom: 'Use custom video',
+        opacity: 'Opacity', blur: 'Blur', veil: 'Veil',
+        cleanup: 'Wipe local data on uninstall (opt out to keep settings & custom video)', wipe: 'Clear all local data (reset)',
+        errNotVideo: 'Not a video file (video/* required)', errQuota: 'Save failed: local storage quota exceeded',
+        on: 'Enabled · opacity ', pct: '%', blurSuffix: ' · blur ', px: 'px', off: 'Disabled', hidden: ' (hidden)',
+        note1: 'The veil adjusts the video\'s own brightness (no overlay layer): darker video on dark themes (more contrast for light text), lighter video on light themes (more contrast for dark text). No slider ever touches UI text.',
+        note2: 'Changes apply instantly and persist; playback pauses when the window is hidden or backgrounded. Custom videos are stored locally and survive restarts.',
+        note3: 'Tip: the wallpaper looks and reads best on dark themes; on light themes the video sits above the text, so results are limited — dark themes are recommended.',
+      },
+    };
+    const T = STRINGS[(navigator.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en'];
+
+    // Shared connection: opened once, closed on dispose so deleteDatabase
+    // during cleanup never gets blocked by our own handles.
+    let dbPromise = null;
+    function idbOpen() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return dbPromise;
+    }
+    async function idbGet(key) {
+      const db = await idbOpen();
+      return new Promise((resolve, reject) => {
+        const req = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(key);
+        req.onsuccess = () => resolve(req.result); // {blob, name, type} | undefined
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function idbPut(key, value) {
+      const db = await idbOpen();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function idbDel(key) {
+      const db = await idbOpen();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    // ---- Uninstall / dispose cleanup -----------------------------------------
+    function revokeSrcCache() {
+      for (const p of srcCache.values()) {
+        p.then((url) => { if (url !== VIDEO_URL) URL.revokeObjectURL(url); }).catch(() => {});
+      }
+      srcCache.clear();
+    }
+    function wipeConfig() {
+      try { window.localStorage.removeItem(STORE_KEY); } catch {}
+    }
+    function deleteDatabase() {
+      return new Promise((resolve) => {
+        if (dbPromise) {
+          dbPromise.then((db) => { try { db.close(); } catch {} }).catch(() => {});
+          dbPromise = null;
+        }
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        const req = indexedDB.deleteDatabase(IDB_NAME);
+        req.onsuccess = finish;
+        req.onerror = finish;
+        req.onblocked = () => {
+          setTimeout(() => { indexedDB.deleteDatabase(IDB_NAME).onsuccess = finish; }, 500);
+        };
+      });
+    }
+    function wipeAllData() {
+      revokeSrcCache();
+      wipeConfig();
+      return deleteDatabase();
+    }
+    // -------------------------------------------------------------------------
+
+    function readConfig() {
+      try {
+        const raw = window.localStorage.getItem(STORE_KEY);
+        return raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
+      } catch { return { ...DEFAULTS }; }
+    }
+    function writeConfig(patch) {
+      const next = { ...readConfig(), ...patch };
+      try { window.localStorage.setItem(STORE_KEY, JSON.stringify(next)); } catch {}
+      window.dispatchEvent(new CustomEvent(EVENT, { detail: next }));
+      return next;
+    }
+
+    // Decode the embedded data URL once into a Blob URL.
+    const srcCache = new Map(); // sourceKey -> Promise<objectURL>
+    function getVideoSrc(kind) {
+      if (!srcCache.has(kind)) {
+        const p = (kind === 'custom'
+          ? idbGet(IDB_KEY).then((rec) => {
+              if (!rec || !rec.blob) throw new Error('no custom video');
+              return URL.createObjectURL(rec.blob);
+            })
+          : fetch(VIDEO_URL).then((r) => r.blob()).then((b) => URL.createObjectURL(b))
+        ).catch(() => VIDEO_URL);
+        srcCache.set(kind, p);
+      }
+      return srcCache.get(kind);
+    }
+    function invalidateSrc(kind) {
+      const p = srcCache.get(kind);
+      if (p) {
+        p.then((url) => { if (url !== VIDEO_URL) URL.revokeObjectURL(url); }).catch(() => {});
+        srcCache.delete(kind);
+      }
+    }
+
+    // ---- Theme detection (real rendered theme, not the OS scheme) ------------
+    // DSH's built-in theme can differ from the OS preference, so the source of
+    // truth is the actual computed background color of the app chrome.
+    function parseCssColor(s) {
+      if (!s) return null;
+      const m = s.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.%]+))?\s*\)/i);
+      if (m) {
+        let a = m[4] === undefined ? 1 : parseFloat(m[4]);
+        if (m[4] && m[4].indexOf('%') >= 0) a = a / 100;
+        return [Number(m[1]), Number(m[2]), Number(m[3]), a];
+      }
+      const hex = s.match(/^#([0-9a-f]{6})$/i);
+      if (hex) return [parseInt(hex[1].slice(0, 2), 16), parseInt(hex[1].slice(2, 4), 16), parseInt(hex[1].slice(4, 6), 16), 1];
+      return null;
+    }
+    function cssLuma(c) {
+      return c ? 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] : null;
+    }
+    // Walk a few frame-level elements and return the first OPAQUE background
+    // color. Transparent backgrounds ('rgba(0,0,0,0)') must be skipped, not
+    // read as black — that exact misread flipped light themes to dark.
+    function hostBgLuma() {
+      try {
+        const probe = [document.documentElement, document.body];
+        for (let i = 0; i < probe.length; i++) probe[i] && probe[i].children && probe[i].children.length && probe.push(probe[i].children[0]);
+        for (const el of probe) {
+          if (!el) continue;
+          const c = parseCssColor(getComputedStyle(el).backgroundColor);
+          if (c && c[3] > 0) return cssLuma(c);
+        }
+      } catch {}
+      return null;
+    }
+    // Foreground text color of the frame — the inverse signal: dark text
+    // implies a light theme and vice versa.
+    function hostTextLuma() {
+      try {
+        const probe = [document.body, document.documentElement];
+        for (const el of probe) {
+          if (!el) continue;
+          const c = parseCssColor(getComputedStyle(el).color);
+          if (c && c[3] > 0) return cssLuma(c);
+        }
+      } catch {}
+      return null;
+    }
+    function isLightTheme() {
+      const bg = hostBgLuma();
+      if (bg !== null) return bg >= 128;
+      const tx = hostTextLuma();
+      if (tx !== null) return tx < 128;
+      return !window.matchMedia || window.matchMedia('(prefers-color-scheme: light)').matches;
+    }
+
+    // Veil is implemented as a brightness() adjustment ON THE VIDEO ITSELF —
+    // never as an overlay film. The plugin renders inside shell.overlay,
+    // which sits ABOVE all UI text, so any film div would grey out the text
+    // it is supposed to protect. Steering the video's own luma keeps every
+    // text pixel untouched: dark theme -> darker video (more contrast for
+    // light text), light theme -> lighter video (more contrast for dark text).
+    function veilFilter(isLight, dim) {
+      if (dim <= 0) return '';
+      let f;
+      if (isLight) {
+        // Light theme: the page background is bright (~220), so the video
+        // must be pushed NEAR WHITE, not merely flattened. A dark video at
+        // brightness 1.6 + contrast(0.7) lands mid-gray (~83) — a dark slab
+        // under dark text. Instead: desaturate, mildly flatten, then a large
+        // brightness multiplier LAST so the frame clips into a uniform pale
+        // field (clipping is a feature here: it erases luma variation).
+        f = 'saturate(' + Math.max(0.05, 1 - dim * 1.2).toFixed(3)
+          + ') contrast(' + Math.max(0.5, 1 - dim * 0.3).toFixed(3)
+          + ') brightness(' + Math.min(3, 1 + dim * 3).toFixed(3) + ')';
+      } else {
+        // Dark theme: crushing toward black flattens naturally — moderate
+        // multipliers suffice (verified good in practice).
+        f = 'brightness(' + Math.max(0.25, 1 - dim * 0.75).toFixed(3)
+          + ') saturate(' + Math.max(0.05, 1 - dim * 1.0).toFixed(3)
+          + ') contrast(' + Math.max(0.4, 1 - dim * 0.35).toFixed(3) + ')';
+      }
+      return f;
+    }
+
+    function Wallpaper() {
+      const [src, setSrc] = React.useState(null);
+      const [cfg, setCfg] = React.useState(readConfig);
+      const videoRef = React.useRef(null);
+      const cfgRef = React.useRef(cfg);
+      cfgRef.current = cfg;
+
+      // Static styling: video blur + veil (brightness) filter. A theme
+      // observer re-applies when the host theme flips; no sampling, no
+      // automatic adjustments of any kind.
+      React.useEffect(() => {
+        const apply = () => {
+          const vid = videoRef.current;
+          if (!vid) return;
+          const parts = [];
+          if (cfgRef.current.blur > 0) parts.push('blur(' + cfgRef.current.blur + 'px)');
+          const veil = veilFilter(isLightTheme(), cfgRef.current.dim);
+          if (veil) parts.push(veil);
+          vid.style.filter = parts.join(' ');
+        };
+        apply();
+        const themeMo = new MutationObserver(apply);
+        if (document.documentElement) {
+          themeMo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        }
+        if (document.body) {
+          themeMo.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        }
+        const schemeMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+        const onScheme = () => apply();
+        if (schemeMq && schemeMq.addEventListener) schemeMq.addEventListener('change', onScheme);
+        return () => {
+          themeMo.disconnect();
+          if (schemeMq && schemeMq.removeEventListener) schemeMq.removeEventListener('change', onScheme);
+        };
+      }, [cfg.blur, cfg.dim, cfg.enabled, src]);
+
+      React.useEffect(() => { getVideoSrc(cfg.custom ? 'custom' : 'embedded').then(setSrc); }, [cfg.custom]);
+      React.useEffect(() => {
+        const onCfg = (e) => {
+          const d = e.detail || {};
+          // __reload: a new custom video was stored — re-read the source even
+          // though the custom flag itself did not flip.
+          if (d.__reload) {
+            setSrc(null);
+            getVideoSrc(d.custom ? 'custom' : 'embedded')
+              .then(setSrc)
+              .catch(() => {});
+            return;
+          }
+          setCfg(d);
+          if (d && d.__wipe) {
+            setSrc(null);
+            getVideoSrc(e.detail.custom ? 'custom' : 'embedded')
+              .then(setSrc)
+              .catch(() => {});
+          }
+        };
+        const onStorage = (e) => { if (e.key === STORE_KEY) setCfg(readConfig()); };
+        const wantsPlay = () => cfgRef.current.enabled && !cfgRef.current.paused
+          && !document.hidden && !(cfgRef.current.pauseOnBlur && !document.hasFocus());
+        // Pause decode entirely while the page is hidden (minimize / background).
+        const syncPlayback = () => {
+          const v = videoRef.current;
+          if (!v) return;
+          if (wantsPlay()) {
+            // When a paused hardware-overlay video comes back on screen,
+            // Chromium can present one stale/corrupt surface frame (large
+            // green blocks). Detach the element for two frames while resuming.
+            v.style.display = 'none';
+            v.play().then(() => {
+              requestAnimationFrame(() => requestAnimationFrame(() => { v.style.display = ''; }));
+            }).catch(() => { v.style.display = ''; });
+          } else {
+            v.pause();
+          }
+        };
+        const onVis = () => syncPlayback();
+        const onFocus = () => { if (cfgRef.current.pauseOnBlur) syncPlayback(); };
+        const onBlur = () => { if (cfgRef.current.pauseOnBlur) syncPlayback(); };
+        window.addEventListener(EVENT, onCfg);
+        window.addEventListener('storage', onStorage);
+        document.addEventListener('visibilitychange', onVis);
+        window.addEventListener('focus', onFocus);
+        window.addEventListener('blur', onBlur);
+        return () => {
+          window.removeEventListener(EVENT, onCfg);
+          window.removeEventListener('storage', onStorage);
+          document.removeEventListener('visibilitychange', onVis);
+          window.removeEventListener('focus', onFocus);
+          window.removeEventListener('blur', onBlur);
+        };
+      }, []);
+
+      React.useEffect(() => {
+        const v = videoRef.current;
+        if (!v) return;
+        const c = cfgRef.current;
+        if (src && c.enabled && !c.paused && !document.hidden && !(c.pauseOnBlur && !document.hasFocus())) {
+          v.play().catch(() => {});
+        } else {
+          v.pause();
+        }
+      }, [src, cfg.enabled, cfg.paused, cfg.pauseOnBlur]);
+
+      const hidden = !cfg.enabled || cfg.paused;
+      return h(React.Fragment, null,
+        h('video', {
+          ref: videoRef,
+          src: src || undefined,
+          autoPlay: true,
+          muted: true,
+          loop: true,
+          playsInline: true,
+          disablePictureInPicture: true,
+          'aria-hidden': true,
+          onError: () => {
+            // Custom video failed to decode: fall back to the embedded clip.
+            // Persist the fallback (writeConfig, not local state only) so the
+            // config page and the next launch agree and don't retry the bad
+            // file on every startup.
+            if (cfgRef.current.custom) {
+              revokeSrcCache();
+              getVideoSrc('embedded').then(setSrc).catch(() => {});
+              const next = writeConfig({ custom: false });
+              setCfg(next);
+            }
+          },
+          style: {
+            position: 'fixed',
+            inset: 0,
+            width: '100vw',
+            height: '100vh',
+            objectFit: 'cover',
+            // Hidden via visibility (not unmount) so playback position and
+            // decode state survive a temporary hide.
+            visibility: hidden ? 'hidden' : 'visible',
+            opacity: cfg.opacity,
+            filter: ((cfg.blur > 0 ? 'blur(' + cfg.blur + 'px) ' : '')
+              + veilFilter(isLightTheme(), cfg.dim)) || undefined,
+            pointerEvents: 'none',
+            zIndex: 0,
+            willChange: 'opacity, filter',
+            transition: 'filter 0.4s ease',
+          },
+        }),
+      );
+    }
+
+    // ---- Configure page --------------------------------------------------------
+    const labelStyle = { display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0', fontSize: 13 };
+    const rangeStyle = { flex: 1, accentColor: 'var(--dsh-accent, #4f7cff)' };
+    const valueStyle = { minWidth: 44, textAlign: 'right', fontVariantNumeric: 'tabular-nums', opacity: 0.75 };
+
+    function Row({ label, value, min, max, step, fmt, onChange }) {
+      return h('label', { style: labelStyle },
+        h('span', { style: { minWidth: 64 } }, label),
+        h('input', {
+          type: 'range', min, max, step, value,
+          style: rangeStyle,
+          onChange: (e) => onChange(Number(e.target.value)),
+        }),
+        h('span', { style: valueStyle }, fmt(value)),
+      );
+    }
+
+    function ConfigPage({ view }) {
+      const [cfg, setCfg] = React.useState(readConfig);
+      const [customName, setCustomName] = React.useState(null);
+      const [err, setErr] = React.useState(null);
+      const fileRef = React.useRef(null);
+      React.useEffect(() => {
+        idbGet(IDB_KEY).then((rec) => setCustomName(rec ? rec.name : null)).catch(() => {});
+      }, []);
+      if (view === 'summary') {
+        return !cfg.enabled
+          ? T.off
+          : T.on + Math.round(cfg.opacity * 100) + T.pct
+            + (cfg.blur > 0 ? T.blurSuffix + cfg.blur + T.px : '')
+            + (cfg.paused ? T.hidden : '');
+      }
+      const update = (patch) => { setErr(null); setCfg(writeConfig(patch)); };
+      const onPickFile = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = '';
+        if (!file) return;
+        if (file.type && !file.type.startsWith('video/')) { setErr(T.errNotVideo); return; }
+        try {
+          await idbPut(IDB_KEY, { blob: file, name: file.name, type: file.type || 'video/mp4' });
+        } catch { setErr(T.errQuota); return; }
+        setCustomName(file.name);
+        update({ custom: true });
+        // Drop the cached blob URL for the old file BEFORE signalling reload,
+        // otherwise getVideoSrc('custom') returns the stale URL and the new
+        // video only shows after a restart.
+        invalidateSrc('custom');
+        window.dispatchEvent(new CustomEvent(EVENT, { detail: { custom: true, __reload: true } }));
+      };
+      const onClearFile = async () => {
+        await idbDel(IDB_KEY).catch(() => {});
+        setCustomName(null);
+        update({ custom: false });
+      };
+      const btnStyle = { font: 'inherit', fontSize: 12, padding: '4px 10px', cursor: 'pointer',
+        borderRadius: 6, border: '1px solid var(--dsh-border, rgba(128,128,128,.4))',
+        background: 'transparent', color: 'inherit' };
+      return h('div', { style: { maxWidth: 420 } },
+        h('label', { style: labelStyle },
+          h('input', { type: 'checkbox', checked: cfg.enabled, onChange: (e) => update({ enabled: e.target.checked }) }),
+          T.enabled,
+        ),
+        h('label', { style: labelStyle },
+          h('input', { type: 'checkbox', checked: cfg.paused, onChange: (e) => update({ paused: e.target.checked }) }),
+          T.paused,
+        ),
+        h('div', { style: { ...labelStyle, alignItems: 'flex-start' } },
+          h('span', { style: { minWidth: 64, paddingTop: 2 } }, T.source),
+          h('div', { style: { flex: 1 } },
+            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', { onClick: () => fileRef.current && fileRef.current.click(), style: btnStyle }, T.pick),
+              cfg.custom ? h('button', { onClick: onClearFile, style: btnStyle }, T.clear) : null,
+            ),
+            err ? h('p', { style: { fontSize: 12, color: '#e5484d', margin: '6px 0 0' } }, err) : null,
+            h('p', { style: { fontSize: 12, opacity: 0.7, margin: '6px 0 0' } },
+              cfg.custom && customName ? T.using + customName + (cfg.custom ? '' : '')
+                : customName ? T.savedButOff + customName + T.enableToUse
+                : T.builtin),
+            h('label', { style: { ...labelStyle, marginTop: 4 } },
+              h('input', {
+                type: 'checkbox',
+                checked: cfg.custom && !!customName,
+                disabled: !customName,
+                onChange: (e) => update({ custom: e.target.checked }),
+              }),
+              T.useCustom,
+            ),
+            h('input', { ref: fileRef, type: 'file', accept: 'video/*', style: { display: 'none' }, onChange: onPickFile }),
+          ),
+        ),
+        h(Row, { label: T.opacity, value: cfg.opacity, min: 0, max: 0.6, step: 0.01,
+          fmt: (v) => Math.round(v * 100) + '%', onChange: (v) => update({ opacity: v }) }),
+        h(Row, { label: T.blur, value: cfg.blur, min: 0, max: 16, step: 1,
+          fmt: (v) => v + 'px', onChange: (v) => update({ blur: v }) }),
+        h(Row, { label: T.veil, value: cfg.dim, min: 0, max: 0.6, step: 0.01,
+          fmt: (v) => Math.round(v * 100) + '%', onChange: (v) => update({ dim: v }) }),
+        h('label', { style: labelStyle },
+          h('input', { type: 'checkbox', checked: cfg.pauseOnBlur, onChange: (e) => update({ pauseOnBlur: e.target.checked }) }),
+          T.pauseOnBlur,
+        ),
+        h('label', { style: labelStyle },
+          h('input', { type: 'checkbox', checked: cfg.uninstallCleanup, onChange: (e) => update({ uninstallCleanup: e.target.checked }) }),
+          T.cleanup,
+        ),
+        h('button', {
+          onClick: async () => {
+            await wipeAllData();
+            setCustomName(null);
+            setCfg({ ...DEFAULTS });
+            window.dispatchEvent(new CustomEvent(EVENT, { detail: { ...DEFAULTS, __wipe: true } }));
+          },
+          style: { ...btnStyle, marginTop: 10 },
+        }, T.wipe),
+        h('p', { style: { fontSize: 12, opacity: 0.6, marginTop: 8 } }, T.note1),
+        h('p', { style: { fontSize: 12, opacity: 0.6, marginTop: 8 } }, T.note2),
+        h('p', { style: { fontSize: 12, opacity: 0.6, marginTop: 8 } }, T.note3),
+        h('p', { style: { fontSize: 11, opacity: 0.5, marginTop: 12 } },
+          '内置默认视频 © padrinan（',
+          h('a', {
+            href: 'https://pixabay.com/zh/videos/vinyl-lp-turntable-analog-retro-57307/',
+            target: '_blank', rel: 'noreferrer',
+            style: { color: 'inherit' },
+          }, 'Pixabay 来源页'),
+          '，Pixabay Content License 允许使用与修改后再分发；内嵌版本为控制体积经剪辑）。代码以 MIT 许可开源，详见仓库 NOTICE.md。'),
+      );
+    }
+
+    return {
+      inject: ['slots'],
+      apply(ctx) {
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+          return;
+        }
+        if (ctx && typeof ctx.on === 'function') {
+          ctx.on('dispose', () => { if (readConfig().uninstallCleanup) wipeAllData(); });
+        }
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'dsh-video-wallpaper',
+          order: -100,
+        }, Wallpaper));
+        ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
+          name: 'plugins.row.config',
+          key: '@cekerel/dsh-video-wallpaper#dsh-video-wallpaper',
+        }, ConfigPage));
+      },
+    };
+  },
+});

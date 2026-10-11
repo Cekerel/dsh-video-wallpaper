@@ -1,0 +1,45 @@
+{
+  "name": "@cekerel/dsh-video-wallpaper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ambient MP4 video wallpaper for the DSH shell: embedded Pixabay default video, user-supplied custom video, manual opacity/blur and theme-aware veil.",
+  "icon": "./icon.svg",
+  "author": "Cekerel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cekerel/dsh-video-wallpaper.git"
+  },
+  "homepage": "https://github.com/Cekerel/dsh-video-wallpaper#readme",
+  "bugs": "https://github.com/Cekerel/dsh-video-wallpaper/issues",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "meta": {
+    "title": "视频壁纸",
+    "description": "全屏 MP4 动态背景：内置 Pixabay 免费许可默认视频，支持自定义视频、透明度/模糊调节与主题感知遮罩（直接调视频亮度，不叠加图层）。",
+    "source": "https://github.com/Cekerel/dsh-video-wallpaper",
+    "copyright": "代码 MIT © Cekerel；默认视频 Pixabay Content License © padrinan（剪辑版），详见 NOTICE.md"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-layout"]
+    }
+  }
+}
